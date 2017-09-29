@@ -84,6 +84,13 @@
       top:4rem;
       z-index: 2;
     }
+    .list-image{
+      width:5rem;
+      height:5rem;
+      background-size: cover;
+      background-repeat: no-repeat;
+      background-attachment: fixed;
+    }
     </style>
   </head>
   <body>
@@ -135,10 +142,10 @@
               @mousemove="penMove($event)"
               @mouseup="penUp($event)"
               style="width:786px;height:452px">
-                <div class="bbox" v-for="(bbox,index) in bboxes"
+                <div class="bbox" v-for="(bbox,index) in hashBboxes[current_time_pos]"
                 :style="bbox.style"
                 @mousedown="penDown($event)"></div>
-                <div class="bbox-info" v-for="(bbox,index) in bboxes"
+                <div class="bbox-info" v-for="(bbox,index) in hashBboxes[current_time_pos]"
                 :style="bbox.infoStyle"
                 @click.self="changeID(index,$event)"
                 >
@@ -186,7 +193,7 @@
                 <i class="ui inverted blue circular image big icon"></i>
                 检测当前帧
               </a>
-              <a class="item" @click="frameAutoRender">
+              <a class="item" @click="startRenderVideo">
                 <i class="ui inverted red circular record big icon"></i>
                 检测全部帧
               </a>
@@ -212,12 +219,28 @@
               <p>Choose a bbox to check when it appears in the video.</p>
               <div class="ui divider"></div>
               <form class="ui form">
-                <div class="field" v-for="bbox in bboxes0">
-                  <input type="checkbox" :value="bbox.id" v-model="picked">
-                  {{bbox.id}}
+                <div class="ui red segment" v-for="(bbox,index) in bboxes0">
+                  <div class="ui two column grid">
+
+                    <div class="column">
+                      <img class="list-image" :src="image_list[index]">
+                    </div>
+
+                    <div class="column">
+                      <div class="field">
+                        <input type="checkbox" :value="bbox.id" v-model="picked">
+                        {{bbox.id}}
+                      </div>
+                    </div>
+
+                  </div>
                 </div>
+
+
+
                 <button class="ui tiny red button" type="button" @click="renderVideo">Find him!</button>
               </form>
+              </div>
             </div>
           </div>
         </div>
@@ -226,6 +249,7 @@
   </div>
   </body>
   <script type="text/javascript">
+  // 基于echarts的出现概率分布图，只需要传入dom即可将该dom转化为概率分布图模块
   var RenderBar = function(dom){
     var self = this;
     this._init = function(dom){
@@ -312,41 +336,45 @@
   var app = new Vue({
     el: '#app',
     data: {
-      vid:{},
-      message: 'Hello Vue!',
-      scale:640/786,
-      pen_is_finished:false,
-      videoController: 'Pause',
-      videoControllerClass:["ui","inverted","orange","circular","pause","big","icon"],
-      penStatus:false,
-      bboxes:[],
-      bboxes0:[],
-      bboxes_length:0,
+      vid:{},//由cookie获取的信息，包含视频的地址，长度，尺寸等信息。
+      scale:640/786, // scale=（视频实际尺寸/视频真实尺寸）
+      pen_is_finished:false,//
+      videoController: 'Pause',//视频播放按钮状态值（取反后）
+      videoControllerClass:["ui","inverted","orange","circular","pause","big","icon"],//视频播放器的class
+      penStatus:false,//画笔状态，画笔是指在绘制bbox时的鼠标，true表示正在绘画
+      bboxes:[],//1.0版本中用于表示当前显示的bbox信息，是bboxes0的子集
+      bboxes0:[],//1.0版本中用于表示所有时刻的所有bbox信息
+      bboxes_length:0,//bboxes的长度，用以避免js对length的低效调用
       bboxes0_length:0,
       board:{},
-      modalClass:["ui","modal"],
+      modalClass:["ui","modal"],//用于控制这遮罩层
       imgDataURL:"",
       inputID:null,
       changingBboxesPos:0,
       renderBboxes:[],
       renderBboxes0:[],
-      trackbar:{
-        pos:0,
-        stat:false,
+      trackbar:{//进度条
+        pos:0,//视频播放的位置
+        stat:false,//
         len:1,
         width:0,
         left:0,
-        post:0,
-        lent:0
+        post:0,//视频播放的时间位置
+        lent:0//视频的总长度
       },
       renderbar:null,
-      picked:[],
+      picked:[],//请求检测的ID列表，作为参数向各API发送，由页面的多选区生成
+      hashBboxes:[],
+      hashBboxes_tag:[],
+      current_time_pos:0,//表示当前视频播放的时刻转数组下标
+      image_list:[]
     },
     methods: {
       goBack:function(){
         Cookies.set("vid","");
         window.location.href = "./index.html";
       },
+      // videoControll() 视频播放暂停控制函数，
       videoControll:function(){
 
         if(this.videoController == "Pause"){
@@ -360,6 +388,7 @@
           // play the video
           this.$refs.video.play();
           this.bboxes = [];
+          this.renderBboxes = [];
           this.bboxes_length = 0;
           this.videoController = "Pause";
           this.videoControllerClass[2] = "orange";
@@ -367,6 +396,8 @@
         }
 
       },
+      // penDown() 画笔mousedown事件
+      // 这里会创建一个新的bbox，包括 id，time，scale，data，style，infostyle几个字段
       penDown:function(event){
         // console.log(this.$refs.board.offsetLeft);
         if(this.videoController == "Play"){
@@ -375,23 +406,23 @@
           this.penStatus = true;
           var _color = "hsla("+parseInt(Math.random()*360)+", 100%, 78%, 0.78)";
           var _bbox = {
-            id:"ID-"+this.bboxes0_length,
-            time:this.$refs.video.currentTime,
-            scale:this.scale,
-            data:{
+            id:"ID-"+this.bboxes0_length, // bbox对应的id
+            time:this.$refs.video.currentTime, // bbox出现的时刻
+            scale:this.scale, //视频放缩比
+            data:{ // 四点坐标的数值（用于计算）
               x0:event.pageX - this.board.x,
               y0:event.pageY - this.board.y,
               x1:event.pageX - this.board.x,
               y1:event.pageY - this.board.y,
             },
-            style:{
+            style:{ // 坐标，长宽，颜色信息（用于绘图）
               left:(event.pageX - this.board.x) + "px",
               top:(event.pageY - this.board.y) + "px",
               width:0,
               height:0,
               borderColor:_color
             },
-            infoStyle:{
+            infoStyle:{ // bbox下部的信息框的坐标，长宽，颜色信息（用于绘图）
               left:(event.pageX - this.board.x) + "px",
               top:(event.pageY - this.board.y) + "px",
               width:0,
@@ -405,12 +436,19 @@
           this.bboxes0.push(_bbox);
           this.bboxes_length ++;
           this.bboxes0_length ++;
+
+          this.current_time_pos = parseInt(this.$refs.video.currentTime * 5);
+          this.hashBboxes[this.current_time_pos].push(_bbox);
+          // 考虑是否修改tag，暂时建议不修改用以区分个人画的和后续渲染的，但问题是未来可能钥重新渲染多次，需要充值函数
+
         }
 
       },
+      // penMove()画笔移动处理，即时更新bbox状态，但暂时不更行bboxes0
       penMove:function(event){
         if(this.penStatus == true){
           event.preventDefault();
+          // var tmp_length = this.hashBboxes[this.current_time_pos].length;
           this.bboxes[this.bboxes_length-1].style.width =  (event.pageX - this.board.x - this.bboxes[this.bboxes_length-1].data.x0) + "px";
           this.bboxes[this.bboxes_length-1].style.height = (event.pageY - this.board.y - this.bboxes[this.bboxes_length-1].data.y0) + "px";
           this.bboxes[this.bboxes_length-1].data.x1 = event.pageX - this.board.x;
@@ -418,42 +456,58 @@
         }
 
       },
+      // penUp() 画笔结束处理
       penUp:function(event){
         if(this.penStatus == true){
+          // 更新bbox的style与data
           this.bboxes[this.bboxes_length-1].style.width =  (event.pageX - this.board.x - this.bboxes[this.bboxes_length-1].data.x0) + "px";
           this.bboxes[this.bboxes_length-1].style.height = (event.pageY - this.board.y - this.bboxes[this.bboxes_length-1].data.y0) + "px";
           this.bboxes[this.bboxes_length-1].data.x1 = event.pageX - this.board.x;
           this.bboxes[this.bboxes_length-1].data.y1 = event.pageY - this.board.y;
-
+          // 更新bbox的infobox信息，同时在结束的时刻设infobox为可视
           this.bboxes[this.bboxes_length-1].infoStyle.top = (this.bboxes[this.bboxes_length-1].data.y1 + 6) + "px";
           this.bboxes[this.bboxes_length-1].infoStyle.width = this.bboxes[this.bboxes_length-1].style.width;
           this.bboxes[this.bboxes_length-1].infoStyle.display = "inline-block";
-
+          // 同步至bboxes0
           this.bboxes0[this.bboxes0_length-1] = this.bboxes[this.bboxes_length-1];
+          _end = this.hashBboxes[this.current_time_pos].length - 1;
+          this.hashBboxes[this.current_time_pos][_end] = this.bboxes[this.bboxes_length-1];
           // //can use bboxes0[pos] = bboxes[pos], but i am not sure the risk for now.
-          // this.bboxes0[this.bboxes0_length-1].style.width =  (event.pageX - this.board.x - this.bboxes0[this.bboxes0_length-1].data.x0) + "px";
-          // this.bboxes0[this.bboxes0_length-1].style.height = (event.pageY - this.board.y - this.bboxes0[this.bboxes0_length-1].data.y0) + "px";
-          // this.bboxes0[this.bboxes0_length-1].data.x1 = event.pageX - this.board.x;
-          // this.bboxes0[this.bboxes0_length-1].data.y1 = event.pageY - this.board.y;
-          //
-          // this.bboxes0[this.bboxes0_length-1].infoStyle.top = (this.bboxes0[this.bboxes0_length-1].data.y1 + 6) + "px";
-          // this.bboxes0[this.bboxes0_length-1].infoStyle.width = this.bboxes0[this.bboxes0_length-1].style.width;
-          // this.bboxes0[this.bboxes0_length-1].infoStyle.display = "inline-block";
-          // xes[this.bboxes0_length-1].data.y1 + 3) ;
+
           this.penStatus = false;
           console.log("Pen up.");
+          var bboxCanvas = document.createElement("canvas");
+          bboxCanvas.width =  this.bboxes[this.bboxes_length-1].data.x1-this.bboxes[this.bboxes_length-1].data.x0;
+          bboxCanvas.height =  this.bboxes[this.bboxes_length-1].data.y1-this.bboxes[this.bboxes_length-1].data.y0;
+          var ctx = bboxCanvas.getContext("2d");
+          // 注意scale，要时刻清楚原视频尺寸与Web展示的尺寸不同
+          ctx.drawImage(this.$refs.video,
+                        this.bboxes[this.bboxes_length-1].data.x0*this.scale,
+                        this.bboxes[this.bboxes_length-1].data.y0*this.scale,
+                        bboxCanvas.width*this.scale,
+                        bboxCanvas.height*this.scale,
+
+                        0,0,
+                        bboxCanvas.width,bboxCanvas.height
+                      );
+          this.imgDataURL = bboxCanvas.toDataURL();
+          this.image_list.push(this.imgDataURL);
+
+
+
         }
       },
+      // changeID(i, event) 修改默认生成的ID，i为bbox在bboxes中的位置
       changeID:function(i,event){
         console.log("Start change ID.");
-        this.changingBboxesPos = i;
-        // this.modalClass.active = true;
-        // this.modalClass.push("active");
+        this.changingBboxesPos = i; // 记录被当前改变的bbox的位置，再提交修改请求的另一个函数中需要用到该变量
+
+        // 创建画布canvas，用于将bbox从视频中截取出来用以展示
         var bboxCanvas = document.createElement("canvas");
         bboxCanvas.width =  this.bboxes[i].data.x1-this.bboxes[i].data.x0;
         bboxCanvas.height =  this.bboxes[i].data.y1-this.bboxes[i].data.y0;
         var ctx = bboxCanvas.getContext("2d");
-        // console.log( bboxs[i].x, bboxs[i].y, bboxs[i].width, bboxs[i].height, bboxs[i].width*scale,bboxs[i].height*scale);
+        // 注意scale，要时刻清楚原视频尺寸与Web展示的尺寸不同
         ctx.drawImage(this.$refs.video,
                       this.bboxes[i].data.x0*this.scale,
                       this.bboxes[i].data.y0*this.scale,
@@ -464,23 +518,45 @@
                       bboxCanvas.width,bboxCanvas.height
                     );
         this.imgDataURL = bboxCanvas.toDataURL();
-        // $("#tmp").append("<img src='"+bboxCanvas.toDataURL()+"'>");
 
-        this.inputID = this.bboxes[i].id;
-        $(".ui.modal").modal("show");
+        this.inputID = this.bboxes[i].id;// this.inputID 是修改表单中input的值（ID），这里做初始化
+
+        $(".ui.modal").modal("show"); //semanticUI的操作
       },
+      // submitChange() 提交ID修改，更新bbox
+      // 问题，如果不点击播放(保存bboxes0到后端)，那么bboxes的信息将如何更新到bboxes0 上？？！可能导致自定义ID无法被更新
       submitChange:function(){
         console.log("ID Changed successfully");
         this.bboxes[this.changingBboxesPos].id = this.inputID;
         console.log(this.bboxes[this.changingBboxesPos].id);
         $(".ui.modal").modal("hide");
       },
+      // updateTrackbar() 随视频播放，实际上是timeupdate事件，更新视频进度条
+      // 新版本中加入了hasbboxes的缓存判断
       updateTrackbar:function(event){
         // console.log(this.$refs.video.duration,this.trackbar.len,"+++");
-        this.trackbar.post = this.$refs.video.currentTime;
-        this.trackbar.pos = this.$refs.video.currentTime*100 / this.$refs.video.duration;
+        this.trackbar.post = this.$refs.video.currentTime; //post表示时间位置（pos + t）
+        this.current_time_pos = parseInt(this.trackbar.post * 5);
+        this.trackbar.pos = this.$refs.video.currentTime*100 / this.$refs.video.duration; //视频播放进度百分比
         $("#progressor").progress({percent: this.trackbar.pos});
+
+        // 判断，当渲染视频的状态为真时渲染视频（避免在未发送渲染指令时就自动进行渲染）
+        if(this.renderStatus == 1){
+          // 判断 从start到end之间的时间内是否有未渲染的时刻，如果有，进行预渲染
+          // 后续提供渲染请求安全边际的数学证明
+          var start_time, end_time;
+          start_time = parseInt(this.$refs.video.currentTime);
+          end_time = 5 * (start_time + 5);
+          for(var i=start_time*5;i<(start_time+5)*5;i++){
+            // 检查i时刻的hashbboxes
+            if(this.hashBboxes_tag[i] == 0){
+                this.renderVideoPackage({"start_time":(i+1)/5.0})
+                break;
+            }
+          }
+        }
       },
+      // trackbarDown 进度条mousedown事件
       trackbarDown:function(event){
         console.log("change the currentTime of video");
         this.trackbar.stat = true;
@@ -490,6 +566,9 @@
         $("#progressor").progress({percent: this.trackbar.pos});
         this.$refs.video.currentTime = this.trackbar.pos * this.$refs.video.duration / 100;
       },
+      // 进度条暂时不支持拖拽式调整， 原因在于会在全局定义mouseUp事件与bbox的画笔冲突
+      // 解决思路有二，一在足够大，但不与bbox画布冲突的dom上定义mouseup事件
+      // 二，定义状态变量，用以区分不同的mouseup事件
       trackbarMove:function(event){
         if(this.trackbar.stat == true){
           this.trackbar.pos = 100*(event.pageX - this.trackbar.left) / this.trackbar.width;
@@ -507,6 +586,7 @@
           this.trackbar.stat = false;
         }
       },
+      // 遗弃的视频渲染功能，思想是渲染全视频，得到全视频的数据，耗时过高，舍弃。
       renderVideo:function(){
         var self = this;
         $.ajax({
@@ -528,6 +608,44 @@
         });
 
       },
+      startRenderVideo:function(){
+        // setInterval()
+        this.renderStatus = 1;
+        this.renderVideoPackage();
+      },
+      //renderVideoPackage()用于发送视频片段的渲染请求，需要片段的起始时间和结束时间
+      renderVideoPackage:function(){
+        var period = 5;
+        var self = this;
+        var start_time,end_time;
+        start_time = self.$refs.video.currentTime;
+        end_time = Math.min(self.$refs.video.duration, start_time + period);
+        $.ajax({
+          url:"http://47.95.9.69:2333/render/package",
+          method:"POST",
+          dataType:"json",
+          data: JSON.stringify({
+            video_url:self.vid["video"],
+            find:self.picked,
+            scale:self.scale,
+            start_time:start_time,
+            period:period
+          }),
+          success:function(resp){
+            console.log(resp);
+            // self.hashBboxes ;
+            var pos = parseInt(start_time * 5);
+            for(var i=0,resp_length = resp.hashBboxes.length;i<resp_length;i++){
+               //5 may be a global variable
+              self.hashBboxes[pos] = resp.hashBboxes[i];
+              self.hashBboxes_tag[pos] = 1;
+              pos++;
+              console.log(pos, self.hashBboxes);
+            }
+          }
+        });
+      },
+      // 概率分布条的渲染，发送一个ID数组，表示想要查询的人，返回对应的概率数组，并渲染为折线统计图
       renderTrackbar:function(){
         var self = this;
         $.ajax({
@@ -535,6 +653,7 @@
           method:"POST",
           dataType:"json",
           data: JSON.stringify({
+              video_url:self.vid["video"],
               find:self.picked,
 	            scale:self.scale
           }),
@@ -543,6 +662,7 @@
           }
         });
       },
+      // 单张图片的渲染， 更新到当前展示的bboxes当中
     	renderImage:function(){
     	var self = this;
     	console.log("render Image");
@@ -551,16 +671,18 @@
               method:"POST",
               dataType:"json",
               data: JSON.stringify({
+                    video_url:self.vid["video"],
                   	find:self.picked,
                 		time:self.$refs.video.currentTime,
                 		scale:self.scale
               }),
               success:function(resp){
-                self.bboxes = resp.bboxes;
+                self.renderBboxes = resp.bboxes;
                 console.log("return rendered bboxes:",resp.bboxes);
               }
             });
     	},
+      // 旧的全局bboxes动态绘制函数，暂时舍弃
       drawRenderBboxes:function(){
         // console.log("painting invertal.");
         var _currentTime = this.$refs.video.currentTime * 1000, b_len = this.renderBboxes0.length;
@@ -571,6 +693,7 @@
           }
         }
       },
+      // 保存bboxes0
       saveBboxes:function(){
         var self = this;
 
@@ -579,6 +702,7 @@
           method:"POST",
           dataType:"json",
           data: JSON.stringify({
+              video_url:self.vid["video"],
               bboxes:self.bboxes0
           }),
           success:function(resp){
@@ -586,27 +710,38 @@
           }
         });
       },
+      // 双监控器机制下的视频预渲染启动函数，暂时停止开发，改为单监控器
       frameAutoRender:function(){
         var self = this;
         setInterval(function(){
-          $.ajax({
-                  url:"http://47.95.9.69:2333/render/image",
-                  method:"POST",
-                  dataType:"json",
-                  data: JSON.stringify({
-                      	find:self.picked,
-                    		time:self.$refs.video.currentTime+0.01,
-                    		scale:self.scale
-                  }),
-                  success:function(resp){
-                    self.bboxes = [];
-                    self.bboxes = resp.bboxes;
-                    console.log("return rendered bboxes:",resp.bboxes);
-                  }
-                });
+          // $.ajax({
+          //         url:"http://47.95.9.69:2333/render/image",
+          //         method:"POST",
+          //         dataType:"json",
+          //         data: JSON.stringify({
+          //             	find:self.picked,
+          //           		time:self.$refs.video.currentTime+0.01,
+          //           		scale:self.scale
+          //         }),
+          //         success:function(resp){
+          //           self.bboxes = [];
+          //           self.bboxes = resp.bboxes;
+          //           console.log("return rendered bboxes:",resp.bboxes);
+          //         }
+          //       });
+          var start_time, end_time;
+          start_time = parseInt(his.$refs.video.currentTime);
+          end_time = 5 * (start_time + 5);
+          for(var i=start_time*5;i<start_time+5;i++){
+            if(this.hashBboxes_tag[i] == 0){
+                break;
+                this.renderVideoPackage({"start_time":start_time+5})
+            }
+          }
 
         },160);
       },
+      // 时间格式化
       sec2std:function(sec){
           sec = Number(sec)
           var h,m,s;
@@ -639,20 +774,17 @@
       this.trackbar.lent = this.vid["length"];
       console.log(this.trackbar.len,this.$refs.video.duration);
       $("#progressor").progress({percent:0});
-      // this.trackbar.len = this.$refs.video.duration;
-      // this.trackbar.left = $("#progressor").offset().left;
-      // this.trackbar.width = $("#progressor").width();
-      // console.log(this.trackbar.len,this.$refs.video.duration);
-      // $("#progressor").progress({percent:0});
-      this.renderbar = new RenderBar(this.$refs.renderbar);
 
-    },
-    updated:function(){
-      // this.trackbar.len = this.$refs.video.duration;
-      // this.trackbar.left = $("#progressor").offset().left;
-      // this.trackbar.width = $("#progressor").width();
-      // console.log(this.trackbar.len,this.$refs.video.duration);
-      // $("#progressor").progress({percent:0});
+      this.renderbar = new RenderBar(this.$refs.renderbar);
+      //hashBboxes 初始化
+      hashBboxes_length = parseInt(this.trackbar.lent * 5);
+      for(var i=0;i<hashBboxes_length;i++){
+        var bboxes_at_currentTime = {};
+        this.hashBboxes_tag.push(0); //tag表示该时刻的bboxes数据是否被加载
+        this.hashBboxes.push([]);
+      }
+      // console.log("init hashBboxes",bboxes_at_currentTime);
+
     }
     })
   </script>
